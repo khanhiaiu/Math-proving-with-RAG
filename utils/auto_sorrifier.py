@@ -21,7 +21,7 @@ from typing import Tuple, List, Dict, Optional
 from tqdm import tqdm
 
 # Constants
-REPL_DIR = "/home/huy/Project/formal_proof/repl"
+REPL_DIR = "/workspace/npthai/APOLLO/repl"
 BLOCK_STARTERS = (
     "have", "·", ".", "cases ", "cases' ", "induction ", 
     "induction' ", "rintro ", "intro ", "calc", "match", 
