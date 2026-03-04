@@ -13,7 +13,7 @@ Architecture:
 
 import subprocess
 import json
-import re
+import threading
 import sys
 import os
 import tempfile
@@ -28,13 +28,73 @@ BLOCK_STARTERS = (
     "lemma", "theorem", "def"
 )
 
+class PersistentASTDaemon:
+    def __init__(self, repl_dir):
+        self.repl_dir = repl_dir        
+        # Gọi file exe của dump_ast_server
+        self.proc = subprocess.Popen(
+            ["lake", "exe", "dump_ast_server"], 
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=self.repl_dir,
+            bufsize=1 # Ép xả buffer liên tục
+        )
+        
+        self.stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self.stderr_thread.start()
+
+    def _read_stderr(self):
+        """Hàm chạy ngầm: Hứng mọi log từ Lean in ra và hiển thị"""
+        for line in self.proc.stderr:
+            line = line.strip()
+            if line:
+                # In màu vàng cho ngầu và dễ phân biệt
+                print(f"\033[93m{line}\033[0m") 
+
+    def get_ast(self, file_path: str) -> List[Dict]:
+        """Gửi tên file vào ống nước và móc JSON ra"""
+        if self.proc.poll() is not None:
+            print("  [!] AST Daemon đã ngỏm. Đang hồi sinh...")
+            self.__init__(self.repl_dir) # Hồi sinh nếu sập
+            
+        # Ném tên file vào cho Lean
+        self.proc.stdin.write(file_path + "\n")
+        self.proc.stdin.flush()
+        
+        blocks = []
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                break # Lean sập
+                
+            line = line.strip()
+            if line == "===EOF===":
+                break # Lean báo đã bóc xong AST của file
+                
+            if line.startswith("{"):
+                try:
+                    blocks.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"  [!] Lỗi parse JSON từ AST Server: {e}")
+                    
+        return blocks
+
+    def close(self):
+        """Giết server khi toàn bộ chương trình kết thúc"""
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait()
+
 class AutoSorrifier:
-    def __init__(self, code: str, max_cycles: int = 20, log_path: Optional[str] = None):
+    def __init__(self, code: str, ast_daemon: PersistentASTDaemon, max_cycles: int = 20, log_path: Optional[str] = None):
         self.current_content = code
         self.max_cycles = max_cycles
         self.log_path = log_path
         self.temp_file_path = ""
         self._last_action_msg = ""
+        self.ast_daemon = ast_daemon
 
     def fix_code(self) -> str:
         """
@@ -256,7 +316,7 @@ class AutoSorrifier:
                     capture_output=True,
                     text=True,
                     cwd=REPL_DIR,
-                    timeout=60
+                    timeout=120
                 )
                 return res.stdout
         except Exception as e:
@@ -292,24 +352,23 @@ class AutoSorrifier:
         return sorted(fatal_errors), sorted(unsolved_goals)
 
     def _get_ast_lines(self) -> List[Dict]:
-        """Dùng dump_ast để soi cấu trúc cây"""
-        # Lưu ý: dump_ast nhận file_path làm argument, không qua stdin
+        """Gọi thẳng Persistent AST Server qua Stdin/Stdout -> Tốc độ ánh sáng"""
         import time
+        # start_time không cần thiết lắm vì Lean Server đã tự in ra stderr, nhưng cứ để
         start_time = time.time()
-        output = self._call_lean_tool(["dump_ast", self.temp_file_path])
-        elapsed_time = time.time() - start_time
-        print(f"[AST] lake exe dump_ast executed in {elapsed_time:.4f} seconds")
         
-        blocks = []
+        # Nhờ Daemon móc AST
+        blocks = self.ast_daemon.get_ast(self.temp_file_path)
+        
+        elapsed_time = time.time() - start_time
+        print(f"  [AST] Persistent Server fetched AST in {elapsed_time:.4f} seconds")
+        
+        # Tính toán line từ byte
         raw_bytes = self.current_content.encode('utf-8')
-        for line in output.splitlines():
-            if line.strip().startswith("{"):
-                try:
-                    b = json.loads(line)
-                    b["start_line"] = self._byte_to_line(raw_bytes, b["start_byte"])
-                    b["end_line"] = self._byte_to_line(raw_bytes, b["end_byte"])
-                    blocks.append(b)
-                except: pass
+        for b in blocks:
+            b["start_line"] = self._byte_to_line(raw_bytes, b["start_byte"])
+            b["end_line"] = self._byte_to_line(raw_bytes, b["end_byte"])
+            
         return blocks
 
     def _clean_redundant_sorries(self, lines: List[str]) -> str:

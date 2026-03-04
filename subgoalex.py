@@ -1,9 +1,8 @@
 from prover.lean.verifier import verify_lean4_file
-from utils.auto_sorrifier import AutoSorrifier
+from utils.auto_sorrifier import AutoSorrifier, PersistentASTDaemon, REPL_DIR
 from utils.syntax_repair import SyntaxCorrector
 import os
 from datetime import datetime
-
 
 code = '''
 import Mathlib
@@ -82,7 +81,7 @@ lemma aime_1983_p3_1_1
 os.makedirs("output", exist_ok=True)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 output_file = f"output/subgoalex.md"
-
+ast_server = PersistentASTDaemon(REPL_DIR)
 with open(output_file, "w", encoding="utf-8") as f:
     f.write(f"# Proof Analysis Report\n\n")
     f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -112,7 +111,7 @@ with open(output_file, "w", encoding="utf-8") as f:
         f.write("\n```\n\n")
 
     f.write("## Sorrification Process\n\n")
-    checker = AutoSorrifier(code_corrected, max_cycles=20)
+    checker = AutoSorrifier(code_corrected, ast_server, max_cycles=20)
     result = checker.fix_code()
 
     f.write("### Sorrified Result\n\n")
