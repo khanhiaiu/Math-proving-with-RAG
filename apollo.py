@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 # -- Local imports (adjust paths if needed) --
 from utils.syntax_repair import SyntaxCorrector
-from utils.sorrify import Sorrifier, ProofTree
+from utils.auto_sorrifier import AutoSorrifier, PersistentASTDaemon
 from utils.hint_repair import ProofRepairer
 from utils.extract_lemmas_from_sorry import LemmaExtractor
 from utils.convert_lean_to_json import get_deepseek_format_proofs
@@ -50,6 +50,9 @@ class ApolloRepair:
             self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
         self.shared_schedulers = shared_schedulers
+        #add repl directory
+        self.repl_dir = "/workspace/npthai/APOLLO/repl"
+        self.ast_daemon = PersistentASTDaemon(self.repl_dir)
 
         self.options = 'set_option pp.instanceTypes true\nset_option pp.numericTypes true\nset_option pp.coercions.types true\nset_option pp.letVarTypes true\nset_option pp.structureInstanceTypes true\nset_option pp.instanceTypes true\nset_option pp.mvars.withType true\nset_option pp.coercions true\nset_option pp.funBinderTypes true\nset_option pp.piBinderTypes true'
 
@@ -67,33 +70,37 @@ class ApolloRepair:
         return code
 
     def run(self) -> str:
-        # prepend additional options for explicit type ontations for variables
-        code = self.preprocess_code(self.code)
-
-        start_time = time.time()
-
-        # 1) Attempt to fix the code (will recurse as necessary)
-        self.fix_code(
-            code=code,
-            attempt=1,
-            log_dir=self.log_dir,
-            is_root=True
-        )
-
-        # 2) Once done, gather everything into a final proof
-        proof_root = Path(self.log_dir)
-        assembler = LeanProofAssembler(proof_root)
-        final_proof_content = assembler.assemble_full_proof()
-
-        # 3) Write out the final assembled proof
-        output_file = proof_root / "assembled_main_theorem.lean"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(final_proof_content)
-
-        print(f"Final assembled proof saved to: {output_file}")
-        elapsed = time.time() - start_time
-        print(f"ApolloRepair finished in {elapsed:.2f}s.")
-        return str(output_file)
+        try:
+            # prepend additional options for explicit type ontations for variables
+            code = self.preprocess_code(self.code)
+    
+            start_time = time.time()
+    
+            # 1) Attempt to fix the code (will recurse as necessary)
+            self.fix_code(
+                code=code,
+                attempt=1,
+                log_dir=self.log_dir,
+                is_root=True
+            )
+    
+            # 2) Once done, gather everything into a final proof
+            proof_root = Path(self.log_dir)
+            assembler = LeanProofAssembler(proof_root)
+            final_proof_content = assembler.assemble_full_proof()
+    
+            # 3) Write out the final assembled proof
+            output_file = proof_root / "assembled_main_theorem.lean"
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(final_proof_content)
+    
+            print(f"Final assembled proof saved to: {output_file}")
+            elapsed = time.time() - start_time
+            print(f"ApolloRepair finished in {elapsed:.2f}s.")
+            return str(output_file)
+        finally:
+            if hasattr(self, 'ast_daemon'):
+                self.ast_daemon.close()
 
     def fix_code(self,
                  code: str,
@@ -114,15 +121,14 @@ class ApolloRepair:
             print(f"[{self.lemma_name}] Attempt {attempt}, after syntax fix:\n{code_corrected}\n")
 
             if not verify_lean4_file(code_corrected)['pass']:
-                # -- Sorrify partial sub-proofs --
-                pt = ProofTree(code_corrected)
-                pt.parse_lean_with_dot_subcases()
-                pt.fix_inline_have_text()
-
-                tree = pt.tree
-                checker = Sorrifier(pt, verify_lean4_file, clean_empty_lines=True, clean_comments=False)
-                code_corrected_sorry = checker.verify_and_fix_tree()
-                print(f"[{self.lemma_name}] After sorrification:\n{code_corrected_sorry}\n")
+                print(f"[{self.lemma_name}] Starting AST-based repair...")
+                patcher = AutoSorrifier(
+                    code=code_corrected, 
+                    ast_daemon=self.ast_daemon, 
+                    max_cycles=30
+                )
+                code_corrected_sorry = patcher.fix_code()
+                print(f"[{self.lemma_name}] After AST-based sorrification:\n{code_corrected_sorry}\n")
             else:
                 code_corrected_sorry = code_corrected
 
